@@ -6,51 +6,117 @@
 #include "config.h"
 
 // ----------------------------------------------------------------------------
-// GLOBAL OBJECTS
+// DBR-NET-006 PART 5: HELTEC V3 LPS8v2 DIRECT RANGE TESTER
 // ----------------------------------------------------------------------------
+
 // Heltec V3 SSD1306 OLED (0x3c address, SDA, SCL)
 SSD1306Wire display(0x3c, OLED_SDA, OLED_SCL);
 
-// RadioLib SX1262 Driver
+// RadioLib SX1262 Transceiver
 Module radioModule(RADIO_NSS, RADIO_DIO1, RADIO_RST, RADIO_BUSY);
 SX1262 radio = &radioModule;
 
-// LoRaWAN Node Instance (RadioLib)
-LoRaWANNode node(&radio, &EU868); // Default region EU868 - user can change region in config
+// LoRaWAN Node Instance configured for IN865 region (per DBR §5.1)
+LoRaWANNode node(&radio, &IN865);
 
-// Telemetry & Packet State
-uint32_t packetCounter = 0;
-unsigned long lastTxTime = 0;
+// Walk-Test Metrics & State
+uint32_t totalSentCount = 0;
+uint32_t ackCount = 0;
+int lastRssi = 0;
+float lastSnr = 0.0f;
+bool lastAckStatus = false;
 bool isJoined = false;
+unsigned long lastTxTime = 0;
 
 // ----------------------------------------------------------------------------
 // HELPER FUNCTIONS
 // ----------------------------------------------------------------------------
-void updateDisplay(const String &status, const String &subtext1 = "", const String &subtext2 = "") {
-    display.clear();
-    display.setFont(ArialMT_Plain_10);
-    display.setTextAlignment(TEXT_ALIGN_LEFT);
-    
-    display.drawString(0, 0, "Heltec V3 Range Finder");
-    display.drawString(0, 12, "--------------------------------");
-    display.drawString(0, 24, "Status: " + status);
-    
-    if (subtext1.length() > 0) {
-        display.drawString(0, 38, subtext1);
-    }
-    if (subtext2.length() > 0) {
-        display.drawString(0, 50, subtext2);
-    }
-    
-    display.display();
-}
 
 float readBatteryVoltage() {
-    // Read ADC and convert to Voltage (Heltec V3 has resistor divider on GPIO 1)
+    // Heltec V3 uses GPIO 37 to enable ADC battery divider circuit
+    pinMode(BATTERY_CTRL, OUTPUT);
+    digitalWrite(BATTERY_CTRL, LOW); // Active LOW to enable battery divider
+    delay(5);
+
     analogReadResolution(12);
     uint32_t raw = analogRead(BATTERY_ADC);
-    float voltage = (float)raw / 4095.0f * 3.3f * 2.0f; // 1:2 voltage divider
+    
+    digitalWrite(BATTERY_CTRL, HIGH); // Disable divider to save battery
+
+    // 1:2 resistor divider formula on 3.3V ADC reference
+    float voltage = ((float)raw / 4095.0f) * 3.3f * 2.0f;
     return voltage;
+}
+
+void drawSignalBars(int x, int y, int rssi, bool ackReceived) {
+    // Draw 5-bar signal indicator based on RSSI thresholds
+    int barHeights[5] = {4, 8, 12, 16, 20};
+    int barWidth = 4;
+    int gap = 2;
+
+    int activeBars = 0;
+    if (ackReceived) {
+        if (rssi > -85)       activeBars = 5;
+        else if (rssi > -95)  activeBars = 4;
+        else if (rssi > -105) activeBars = 3;
+        else if (rssi > -115) activeBars = 2;
+        else if (rssi > -125) activeBars = 1;
+    }
+
+    for (int i = 0; i < 5; i++) {
+        int bx = x + i * (barWidth + gap);
+        int by = y + (20 - barHeights[i]);
+        
+        if (i < activeBars) {
+            display.fillRect(bx, by, barWidth, barHeights[i]);
+        } else {
+            display.drawRect(bx, by, barWidth, barHeights[i]);
+        }
+    }
+}
+
+void updateOledDisplay(const String &statusLine, bool showMetrics = true) {
+    display.clear();
+    display.setTextAlignment(TEXT_ALIGN_LEFT);
+
+    // Header
+    display.setFont(ArialMT_Plain_10);
+    display.drawString(0, 0, "LPS8v2 Range Tester");
+    display.drawString(0, 11, "--------------------------------");
+
+    if (!showMetrics) {
+        // Status / Join screen
+        display.setFont(ArialMT_Plain_10);
+        display.drawString(0, 26, statusLine);
+        display.drawString(0, 42, "Region: IN865 (OTAA)");
+    } else {
+        // Main Walk-Test Display (per DBR §5.4)
+        if (lastAckStatus) {
+            // Large RSSI Readout
+            display.setFont(ArialMT_Plain_16);
+            display.drawString(0, 24, String(lastRssi) + " dBm");
+
+            // Signal Strength 5-Bar Meter
+            drawSignalBars(90, 24, lastRssi, true);
+        } else {
+            // NO ACK State
+            display.setFont(ArialMT_Plain_16);
+            display.drawString(0, 24, "NO ACK");
+            drawSignalBars(90, 24, -999, false);
+        }
+
+        // Metrics & Reach %
+        display.setFont(ArialMT_Plain_10);
+        float reachPct = (totalSentCount > 0) ? ((float)ackCount / (float)totalSentCount) * 100.0f : 0.0f;
+        
+        String metricsLine1 = "SNR: " + String(lastSnr, 1) + " dB | Vbat: " + String(readBatteryVoltage(), 2) + "V";
+        String metricsLine2 = "Reach: " + String((int)reachPct) + "% (n=" + String(totalSentCount) + ")";
+
+        display.drawString(0, 43, metricsLine1);
+        display.drawString(0, 54, metricsLine2);
+    }
+
+    display.display();
 }
 
 // ----------------------------------------------------------------------------
@@ -59,9 +125,13 @@ float readBatteryVoltage() {
 void setup() {
     Serial.begin(115200);
     delay(1000);
+
     Serial.println("\n==============================================");
-    Serial.println("Heltec LoRa32 v3 - Dragino LPS8N v2 Range Test");
+    Serial.println("DBR-NET-006: 5F Urbanwoods LoRa Range Tester");
+    Serial.println("Firmware: LPS8v2 Direct Tester (Part 5)");
+    Serial.println("Region: IN865 | LoRaWAN OTAA | Confirmed Uplink");
     Serial.println("==============================================");
+    Serial.println("CSV Header: millis,seq,rssi_dbm,snr_db,ack_received,vbat");
 
     // 1. Turn ON Vext Power (GPIO 36 LOW powers OLED & SX1262)
     pinMode(VEXT_PIN, OUTPUT);
@@ -75,12 +145,12 @@ void setup() {
     digitalWrite(OLED_RST, HIGH);
     delay(50);
 
-    // 3. Initialize Display
+    // 3. Initialize OLED
     display.init();
     display.flipScreenVertically();
-    updateDisplay("Initializing...");
+    updateOledDisplay("Initializing Hardware...", false);
 
-    // 4. Initialize SPI Bus with Heltec V3 Pins
+    // 4. Initialize SPI Bus with Heltec V3 Pinout
     SPI.begin(RADIO_SCK, RADIO_MISO, RADIO_MOSI, RADIO_NSS);
 
     // 5. Initialize SX1262 Radio
@@ -90,11 +160,11 @@ void setup() {
         Serial.println("SUCCESS!");
     } else {
         Serial.printf("FAILED, code %d\n", state);
-        updateDisplay("Radio Init Fail", "Code: " + String(state));
+        updateOledDisplay("Radio Init Fail: " + String(state), false);
         while (true) { delay(1000); }
     }
 
-    // 6. Set Heltec V3 TCXO Voltage (1.6V required for Heltec V3 32MHz crystal!)
+    // 6. Set Heltec V3 TCXO Voltage (1.6V required for 32MHz crystal per DBR §3.1)
     Serial.print("[RadioLib] Setting TCXO 1.6V... ");
     state = radio.setTCXO(1.6);
     if (state == RADIOLIB_ERR_NONE) {
@@ -103,32 +173,28 @@ void setup() {
         Serial.printf("FAILED, code %d\n", state);
     }
 
-    // 7. LoRaWAN OTAA Setup
-    Serial.println("[LoRaWAN] Configuring Keys & OTAA...");
-    updateDisplay("Joining Network...", "ChirpStack OTAA");
+    // 7. LoRaWAN OTAA Setup (IN865 Region)
+    Serial.println("[LoRaWAN] Configuring OTAA Keys for IN865...");
+    updateOledDisplay("Joining ChirpStack...", false);
 
-    // Begin LoRaWAN Node setup
     state = node.beginOTAA(LORAWAN_JOIN_EUI, LORAWAN_DEV_EUI, LORAWAN_APP_KEY, LORAWAN_NWK_KEY);
-    if (state == RADIOLIB_ERR_NONE) {
-        Serial.println("[LoRaWAN] Join Request Sent!");
-        updateDisplay("Joining...", "Connecting to LPS8N");
-    } else {
-        Serial.printf("[LoRaWAN] OTAA Config Failed, code %d\n", state);
-        updateDisplay("Join Config Error", "Code: " + String(state));
+    if (state != RADIOLIB_ERR_NONE) {
+        Serial.printf("[LoRaWAN] OTAA Config Error: %d\n", state);
+        updateOledDisplay("OTAA Config Err: " + String(state), false);
     }
 
-    // Perform Join Attempt
+    // Attempt Initial Join
     state = node.activateOTAA();
     if (state == RADIOLIB_ERR_NONE) {
         isJoined = true;
-        Serial.println("[LoRaWAN] JOINED ChirpStack Network Successfully!");
-        updateDisplay("Network Joined!", "ChirpStack Ready");
+        Serial.println("[LoRaWAN] OTAA JOIN SUCCESSFUL!");
+        updateOledDisplay("Joined Network!", false);
     } else {
-        Serial.printf("[LoRaWAN] Join Failed, code %d. Will retry in loop.\n", state);
-        updateDisplay("Join Pending...", "Retrying OTAA");
+        Serial.printf("[LoRaWAN] OTAA Join Pending (Code %d). Will retry in loop.\n", state);
+        updateOledDisplay("Joining Network... (Pending)", false);
     }
 
-    delay(2000);
+    delay(1500);
 }
 
 // ----------------------------------------------------------------------------
@@ -137,58 +203,89 @@ void setup() {
 void loop() {
     unsigned long now = millis();
 
-    // Check if network needs joining / re-joining
+    // 1. Join Loop (if not yet joined)
     if (!isJoined) {
         if (now - lastTxTime >= 10000) { // Retry join every 10s
             lastTxTime = now;
-            Serial.println("[LoRaWAN] Retrying OTAA Join...");
-            updateDisplay("Joining...", "Attempting OTAA");
-            
+            Serial.println("[LoRaWAN] Retrying OTAA Join (IN865)...");
+            updateOledDisplay("Retrying OTAA Join...", false);
+
             int state = node.activateOTAA();
             if (state == RADIOLIB_ERR_NONE) {
                 isJoined = true;
-                Serial.println("[LoRaWAN] JOIN SUCCESSFUL!");
-                updateDisplay("Joined ChirpStack!", "Ready for testing");
+                Serial.println("[LoRaWAN] OTAA JOIN SUCCESSFUL!");
+                updateOledDisplay("Joined ChirpStack!", false);
             } else {
                 Serial.printf("[LoRaWAN] Join attempt failed, code %d\n", state);
-                updateDisplay("Join Failed", "Retrying in 10s");
+                updateOledDisplay("Join Failed (Err " + String(state) + ")", false);
             }
         }
         return;
     }
 
-    // Periodic Uplink Transmission
+    // 2. Periodic Confirmed Uplink Loop (Every 10 seconds per DBR §5.1)
     if (now - lastTxTime >= UPLINK_INTERVAL_MS) {
         lastTxTime = now;
-        packetCounter++;
+        totalSentCount++;
 
         float vbat = readBatteryVoltage();
-        Serial.printf("\n[Uplink #%u] Preparing Packet | Vbat: %.2fV\n", packetCounter, vbat);
 
-        // Construct 6-byte Payload: [Counter (4 bytes)][Vbat*100 (2 bytes)]
-        uint8_t payload[6];
-        payload[0] = (packetCounter >> 24) & 0xFF;
-        payload[1] = (packetCounter >> 16) & 0xFF;
-        payload[2] = (packetCounter >> 8) & 0xFF;
-        payload[3] = packetCounter & 0xFF;
+        // 1-Byte Telemetry Payload: [SeqCounter & 0xFF]
+        uint8_t payload[1];
+        payload[0] = (uint8_t)(totalSentCount & 0xFF);
 
-        uint16_t vbatInt = (uint16_t)(vbat * 100.0f);
-        payload[4] = (vbatInt >> 8) & 0xFF;
-        payload[5] = vbatInt & 0xFF;
+        Serial.printf("\n[Tx #%u] Sending Confirmed Uplink (IN865)... ", totalSentCount);
 
-        updateDisplay("Sending Pkt #" + String(packetCounter), "Payload: 6 Bytes", "Vbat: " + String(vbat, 2) + "V");
+        // Structs for tracking uplink & downlink events (per DBR §5.2)
+        LoRaWANEvent_t eventUp;
+        LoRaWANEvent_t eventDown;
 
-        // Transmit Uplink on FPort 1
-        int state = node.sendReceive(payload, sizeof(payload), 1);
+        // Perform CONFIRMED send & receive (isConfirmed = true)
+        int state = node.sendReceive(payload, sizeof(payload), LORAWAN_FPORT, true, &eventUp, &eventDown);
+
         if (state == RADIOLIB_ERR_NONE) {
-            Serial.println("[Uplink] Packet sent & ACK/Downlink received!");
-            updateDisplay("Pkt #" + String(packetCounter) + " Sent OK!", "Gateway Received", "RSSI/SNR on ChirpStack");
+            // ACK & Downlink Received Successfully!
+            ackCount++;
+            lastAckStatus = true;
+            lastRssi = (int)eventDown.power; // eventDown.power contains RSSI per DBR §5.2
+            lastSnr = radio.getSNR();       // Read downlink SNR
+
+            Serial.printf("ACK OK! | Downlink RSSI: %d dBm | SNR: %.1f dB | Vbat: %.2fV\n",
+                          lastRssi, lastSnr, vbat);
+
+            // Log CSV Line over USB Serial
+            Serial.printf("CSV,%lu,%u,%d,%.1f,1,%.2f\n",
+                          now, totalSentCount, lastRssi, lastSnr, vbat);
+
+            updateOledDisplay("ACK OK");
+
         } else if (state == RADIOLIB_ERR_NO_RX_WINDOW) {
-            Serial.println("[Uplink] Packet sent (unconfirmed).");
-            updateDisplay("Pkt #" + String(packetCounter) + " Sent OK!", "TX Success", "Waiting next interval");
+            // Uplink sent, but NO ACK received in RX1/RX2
+            lastAckStatus = false;
+            lastRssi = -999;
+            lastSnr = 0.0f;
+
+            Serial.printf("NO ACK Received! (Code %d) | Vbat: %.2fV\n", state, vbat);
+
+            // Log CSV Line over USB Serial
+            Serial.printf("CSV,%lu,%u,-999,0.0,0,%.2f\n",
+                          now, totalSentCount, vbat);
+
+            updateOledDisplay("NO ACK");
+
         } else {
-            Serial.printf("[Uplink] Send failed, code %d\n", state);
-            updateDisplay("Pkt #" + String(packetCounter) + " Fail", "Code: " + String(state));
+            // Transmission Error
+            lastAckStatus = false;
+            lastRssi = -999;
+            lastSnr = 0.0f;
+
+            Serial.printf("TX Error (Code %d) | Vbat: %.2fV\n", state, vbat);
+
+            // Log CSV Line over USB Serial
+            Serial.printf("CSV,%lu,%u,-999,0.0,0,%.2f\n",
+                          now, totalSentCount, vbat);
+
+            updateOledDisplay("TX Error: " + String(state));
         }
     }
 }
