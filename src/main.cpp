@@ -24,7 +24,9 @@ uint32_t totalSentCount = 0;
 uint32_t ackCount = 0;
 int lastRssi = 0;
 float lastSnr = 0.0f;
+float lastVbat = 0.0f;
 bool lastAckStatus = false;
+int lastTxErrorCode = 0; // 0 = No error (or normal NO_RX_WINDOW), non-zero = RadioLib TX fault code
 bool isJoined = false;
 unsigned long lastTxTime = 0;
 
@@ -98,8 +100,13 @@ void updateOledDisplay(const String &statusLine, bool showMetrics = true) {
 
             // Signal Strength 5-Bar Meter
             drawSignalBars(90, 24, lastRssi, true);
+        } else if (lastTxErrorCode != 0) {
+            // Hardware / Radio TX Error State
+            display.setFont(ArialMT_Plain_16);
+            display.drawString(0, 24, "TX ERR " + String(lastTxErrorCode));
+            drawSignalBars(90, 24, -999, false);
         } else {
-            // NO ACK State
+            // Normal NO ACK State (out of range / missed ACK)
             display.setFont(ArialMT_Plain_16);
             display.drawString(0, 24, "NO ACK");
             drawSignalBars(90, 24, -999, false);
@@ -109,7 +116,7 @@ void updateOledDisplay(const String &statusLine, bool showMetrics = true) {
         display.setFont(ArialMT_Plain_10);
         float reachPct = (totalSentCount > 0) ? ((float)ackCount / (float)totalSentCount) * 100.0f : 0.0f;
         
-        String metricsLine1 = "SNR: " + String(lastSnr, 1) + " dB | Vbat: " + String(readBatteryVoltage(), 2) + "V";
+        String metricsLine1 = "SNR: " + String(lastSnr, 1) + " dB | Vbat: " + String(lastVbat, 2) + "V";
         String metricsLine2 = "Reach: " + String((int)reachPct) + "% (n=" + String(totalSentCount) + ")";
 
         display.drawString(0, 43, metricsLine1);
@@ -228,7 +235,7 @@ void loop() {
         lastTxTime = now;
         totalSentCount++;
 
-        float vbat = readBatteryVoltage();
+        lastVbat = readBatteryVoltage();
 
         // 1-Byte Telemetry Payload: [SeqCounter & 0xFF]
         uint8_t payload[1];
@@ -236,56 +243,42 @@ void loop() {
 
         Serial.printf("\n[Tx #%u] Sending Confirmed Uplink (IN865)... ", totalSentCount);
 
-        // Structs for tracking uplink & downlink events (per DBR §5.2)
-        LoRaWANEvent_t eventUp;
+        // Downlink event struct (eventUp omitted using nullptr per finding #4)
         LoRaWANEvent_t eventDown;
 
         // Perform CONFIRMED send & receive (isConfirmed = true)
-        int state = node.sendReceive(payload, sizeof(payload), LORAWAN_FPORT, true, &eventUp, &eventDown);
+        int state = node.sendReceive(payload, sizeof(payload), LORAWAN_FPORT, true, nullptr, &eventDown);
 
         if (state == RADIOLIB_ERR_NONE) {
             // ACK & Downlink Received Successfully!
             ackCount++;
             lastAckStatus = true;
+            lastTxErrorCode = 0;
             lastRssi = (int)eventDown.power; // eventDown.power contains RSSI per DBR §5.2
             lastSnr = radio.getSNR();       // Read downlink SNR
 
             Serial.printf("ACK OK! | Downlink RSSI: %d dBm | SNR: %.1f dB | Vbat: %.2fV\n",
-                          lastRssi, lastSnr, vbat);
-
-            // Log CSV Line over USB Serial
-            Serial.printf("CSV,%lu,%u,%d,%.1f,1,%.2f\n",
-                          now, totalSentCount, lastRssi, lastSnr, vbat);
-
-            updateOledDisplay("ACK OK");
-
-        } else if (state == RADIOLIB_ERR_NO_RX_WINDOW) {
-            // Uplink sent, but NO ACK received in RX1/RX2
-            lastAckStatus = false;
-            lastRssi = -999;
-            lastSnr = 0.0f;
-
-            Serial.printf("NO ACK Received! (Code %d) | Vbat: %.2fV\n", state, vbat);
-
-            // Log CSV Line over USB Serial
-            Serial.printf("CSV,%lu,%u,-999,0.0,0,%.2f\n",
-                          now, totalSentCount, vbat);
-
-            updateOledDisplay("NO ACK");
-
+                          lastRssi, lastSnr, lastVbat);
         } else {
-            // Transmission Error
+            // No ACK or TX Fault
             lastAckStatus = false;
             lastRssi = -999;
             lastSnr = 0.0f;
 
-            Serial.printf("TX Error (Code %d) | Vbat: %.2fV\n", state, vbat);
-
-            // Log CSV Line over USB Serial
-            Serial.printf("CSV,%lu,%u,-999,0.0,0,%.2f\n",
-                          now, totalSentCount, vbat);
-
-            updateOledDisplay("TX Error: " + String(state));
+            if (state == RADIOLIB_ERR_NO_RX_WINDOW) {
+                lastTxErrorCode = 0; // Normal no-ACK at range
+                Serial.printf("NO ACK Received! | Vbat: %.2fV\n", lastVbat);
+            } else {
+                lastTxErrorCode = state; // Radio / hardware TX error
+                Serial.printf("TX Error (Code %d) | Vbat: %.2fV\n", state, lastVbat);
+            }
         }
+
+        // Single unified CSV Log over USB Serial
+        Serial.printf("CSV,%lu,%u,%d,%.1f,%d,%.2f\n",
+                      now, totalSentCount, lastRssi, lastSnr, lastAckStatus ? 1 : 0, lastVbat);
+
+        // Update OLED display with cached metrics
+        updateOledDisplay("", true);
     }
 }
