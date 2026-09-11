@@ -77,7 +77,7 @@ void drawSignalBars(int x, int y, int rssi, bool ackReceived) {
     }
 }
 
-void updateOledDisplay(const String &statusLine, bool showMetrics = true) {
+void updateOledDisplay(const String &statusLine = "", bool showMetrics = true) {
     display.clear();
     display.setTextAlignment(TEXT_ALIGN_LEFT);
 
@@ -243,35 +243,42 @@ void loop() {
 
         Serial.printf("\n[Tx #%u] Sending Confirmed Uplink (IN865)... ", totalSentCount);
 
-        // Downlink event struct (eventUp omitted using nullptr per finding #4)
+        // Downlink event struct
         LoRaWANEvent_t eventDown;
 
         // Perform CONFIRMED send & receive (isConfirmed = true)
+        // RadioLib sendReceive return values:
+        //   state > 0: rxWindow > 0 (1 or 2), DOWNLINK/ACK RECEIVED! eventDown is populated.
+        //   state == 0 (RADIOLIB_ERR_NONE): Uplink sent OK, but NO DOWNLINK/ACK received in RX1 or RX2.
+        //   state < 0 (state < RADIOLIB_ERR_NONE): Hardware/Network TX error code.
         int state = node.sendReceive(payload, sizeof(payload), LORAWAN_FPORT, true, nullptr, &eventDown);
 
-        if (state == RADIOLIB_ERR_NONE) {
-            // ACK & Downlink Received Successfully!
+        if (state > 0) {
+            // ACK & Downlink Received Successfully (state = RX Window 1 or 2)!
             ackCount++;
             lastAckStatus = true;
             lastTxErrorCode = 0;
             lastRssi = (int)eventDown.power; // eventDown.power contains RSSI per DBR §5.2
             lastSnr = radio.getSNR();       // Read downlink SNR
 
-            Serial.printf("ACK OK! | Downlink RSSI: %d dBm | SNR: %.1f dB | Vbat: %.2fV\n",
-                          lastRssi, lastSnr, lastVbat);
-        } else {
-            // No ACK or TX Fault
+            Serial.printf("ACK OK! (RX Window %d) | Downlink RSSI: %d dBm | SNR: %.1f dB | Vbat: %.2fV\n",
+                          state, lastRssi, lastSnr, lastVbat);
+        } else if (state == RADIOLIB_ERR_NONE) {
+            // Uplink sent, but NO ACK/Downlink received in RX1 or RX2 (rxWindow == 0)
             lastAckStatus = false;
+            lastTxErrorCode = 0;
             lastRssi = -999;
             lastSnr = 0.0f;
 
-            if (state == RADIOLIB_ERR_NO_RX_WINDOW) {
-                lastTxErrorCode = 0; // Normal no-ACK at range
-                Serial.printf("NO ACK Received! | Vbat: %.2fV\n", lastVbat);
-            } else {
-                lastTxErrorCode = state; // Radio / hardware TX error
-                Serial.printf("TX Error (Code %d) | Vbat: %.2fV\n", state, lastVbat);
-            }
+            Serial.printf("NO ACK Received! (RX Window 0) | Vbat: %.2fV\n", lastVbat);
+        } else {
+            // Hardware / Radio TX Error (state < 0)
+            lastAckStatus = false;
+            lastTxErrorCode = state;
+            lastRssi = -999;
+            lastSnr = 0.0f;
+
+            Serial.printf("TX Error (Code %d) | Vbat: %.2fV\n", state, lastVbat);
         }
 
         // Single unified CSV Log over USB Serial
