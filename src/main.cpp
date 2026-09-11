@@ -77,7 +77,7 @@ void drawSignalBars(int x, int y, int rssi, bool ackReceived) {
     }
 }
 
-void updateOledDisplay(const String &statusLine = "", bool showMetrics = true) {
+void updateOledDisplay(const String &statusLine, bool showMetrics = true) {
     display.clear();
     display.setTextAlignment(TEXT_ALIGN_LEFT);
 
@@ -263,22 +263,21 @@ void loop() {
 
             Serial.printf("ACK OK! (RX Window %d) | Downlink RSSI: %d dBm | SNR: %.1f dB | Vbat: %.2fV\n",
                           state, lastRssi, lastSnr, lastVbat);
-        } else if (state == RADIOLIB_ERR_NONE) {
-            // Uplink sent, but NO ACK/Downlink received in RX1 or RX2 (rxWindow == 0)
-            lastAckStatus = false;
-            lastTxErrorCode = 0;
-            lastRssi = -999;
-            lastSnr = 0.0f;
-
-            Serial.printf("NO ACK Received! (RX Window 0) | Vbat: %.2fV\n", lastVbat);
         } else {
-            // Hardware / Radio TX Error (state < 0)
+            // No ACK or Hardware TX Fault
             lastAckStatus = false;
-            lastTxErrorCode = state;
             lastRssi = -999;
             lastSnr = 0.0f;
 
-            Serial.printf("TX Error (Code %d) | Vbat: %.2fV\n", state, lastVbat);
+            if (state == RADIOLIB_ERR_NONE) {
+                // Uplink sent, but NO ACK/Downlink received in RX1 or RX2 (rxWindow == 0)
+                lastTxErrorCode = 0;
+                Serial.printf("NO ACK Received! (RX Window 0) | Vbat: %.2fV\n", lastVbat);
+            } else {
+                // Hardware / Radio TX Error (state < 0)
+                lastTxErrorCode = state;
+                Serial.printf("TX Error (Code %d) | Vbat: %.2fV\n", state, lastVbat);
+            }
         }
 
         // Single unified CSV Log over USB Serial
