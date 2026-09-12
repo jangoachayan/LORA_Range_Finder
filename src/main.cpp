@@ -30,6 +30,10 @@ int lastTxErrorCode = 0; // 0 = No error (or normal NO_RX_WINDOW), non-zero = Ra
 bool isJoined = false;
 unsigned long lastTxTime = 0;
 
+// Button State
+bool lastButtonState = HIGH;
+unsigned long lastDebounceTime = 0;
+
 // ----------------------------------------------------------------------------
 // HELPER FUNCTIONS
 // ----------------------------------------------------------------------------
@@ -126,6 +130,67 @@ void updateOledDisplay(const String &statusLine, bool showMetrics = true) {
     display.display();
 }
 
+void sendUplinkPing(unsigned long now, bool isManualTrigger = false) {
+    lastTxTime = now; // Reset 10-second timer to start fresh from this transmission
+    totalSentCount++;
+
+    lastVbat = readBatteryVoltage();
+
+    // 1-Byte Telemetry Payload: [SeqCounter & 0xFF]
+    uint8_t payload[1];
+    payload[0] = (uint8_t)(totalSentCount & 0xFF);
+
+    if (isManualTrigger) {
+        Serial.printf("\n[Button Tx #%u] Manual Ping Triggered... ", totalSentCount);
+    } else {
+        Serial.printf("\n[Auto Tx #%u] Sending Confirmed Uplink... ", totalSentCount);
+    }
+
+    // Downlink event struct
+    LoRaWANEvent_t eventDown;
+
+    // Perform CONFIRMED send & receive (isConfirmed = true)
+    // RadioLib sendReceive return values:
+    //   state > 0: rxWindow > 0 (1 or 2), DOWNLINK/ACK RECEIVED! eventDown is populated.
+    //   state == 0 (RADIOLIB_ERR_NONE): Uplink sent OK, but NO DOWNLINK/ACK received in RX1 or RX2.
+    //   state < 0 (state < RADIOLIB_ERR_NONE): Hardware/Network TX error code.
+    int state = node.sendReceive(payload, sizeof(payload), LORAWAN_FPORT, true, nullptr, &eventDown);
+
+    if (state > 0) {
+        // ACK & Downlink Received Successfully (state = RX Window 1 or 2)!
+        ackCount++;
+        lastAckStatus = true;
+        lastTxErrorCode = 0;
+        lastRssi = (int)eventDown.power; // eventDown.power contains RSSI per DBR §5.2
+        lastSnr = radio.getSNR();       // Read downlink SNR
+
+        Serial.printf("ACK OK! (RX Window %d) | Downlink RSSI: %d dBm | SNR: %.1f dB | Vbat: %.2fV\n",
+                      state, lastRssi, lastSnr, lastVbat);
+    } else {
+        // No ACK or Hardware TX Fault
+        lastAckStatus = false;
+        lastRssi = -999;
+        lastSnr = 0.0f;
+
+        if (state == RADIOLIB_ERR_NONE) {
+            // Uplink sent, but NO ACK/Downlink received in RX1 or RX2 (rxWindow == 0)
+            lastTxErrorCode = 0;
+            Serial.printf("NO ACK Received! (RX Window 0) | Vbat: %.2fV\n", lastVbat);
+        } else {
+            // Hardware / Radio TX Error (state < 0)
+            lastTxErrorCode = state;
+            Serial.printf("TX Error (Code %d) | Vbat: %.2fV\n", state, lastVbat);
+        }
+    }
+
+    // Single unified CSV Log over USB Serial
+    Serial.printf("CSV,%lu,%u,%d,%.1f,%d,%.2f\n",
+                  now, totalSentCount, lastRssi, lastSnr, lastAckStatus ? 1 : 0, lastVbat);
+
+    // Update OLED display with cached metrics
+    updateOledDisplay("", true);
+}
+
 // ----------------------------------------------------------------------------
 // SETUP
 // ----------------------------------------------------------------------------
@@ -137,8 +202,12 @@ void setup() {
     Serial.println("DBR-NET-006: 5F Urbanwoods LoRa Range Tester");
     Serial.println("Firmware: LPS8v2 Direct Tester (Part 5)");
     Serial.println("Region: IN865 | LoRaWAN OTAA | Confirmed Uplink");
+    Serial.println("Features: Auto 10s Ping + Manual PRG Button Trigger");
     Serial.println("==============================================");
     Serial.println("CSV Header: millis,seq,rssi_dbm,snr_db,ack_received,vbat");
+
+    // 0. Configure Heltec V3 PRG Button (GPIO 0)
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
 
     // 1. Turn ON Vext Power (GPIO 36 LOW powers OLED & SX1262)
     pinMode(VEXT_PIN, OUTPUT);
@@ -230,61 +299,17 @@ void loop() {
         return;
     }
 
-    // 2. Periodic Confirmed Uplink Loop (Every 10 seconds per DBR §5.1)
+    // 2. Manual PRG Button Press Trigger (GPIO 0)
+    bool currentButtonState = digitalRead(BUTTON_PIN);
+    if (currentButtonState == LOW && lastButtonState == HIGH && (now - lastDebounceTime >= DEBOUNCE_DELAY_MS)) {
+        lastDebounceTime = now;
+        Serial.println("\n[Button] PRG Button Pressed! Triggering immediate ping...");
+        sendUplinkPing(now, true);
+    }
+    lastButtonState = currentButtonState;
+
+    // 3. Periodic Confirmed Uplink Loop (Every 10 seconds per DBR §5.1)
     if (now - lastTxTime >= UPLINK_INTERVAL_MS) {
-        lastTxTime = now;
-        totalSentCount++;
-
-        lastVbat = readBatteryVoltage();
-
-        // 1-Byte Telemetry Payload: [SeqCounter & 0xFF]
-        uint8_t payload[1];
-        payload[0] = (uint8_t)(totalSentCount & 0xFF);
-
-        Serial.printf("\n[Tx #%u] Sending Confirmed Uplink (IN865)... ", totalSentCount);
-
-        // Downlink event struct
-        LoRaWANEvent_t eventDown;
-
-        // Perform CONFIRMED send & receive (isConfirmed = true)
-        // RadioLib sendReceive return values:
-        //   state > 0: rxWindow > 0 (1 or 2), DOWNLINK/ACK RECEIVED! eventDown is populated.
-        //   state == 0 (RADIOLIB_ERR_NONE): Uplink sent OK, but NO DOWNLINK/ACK received in RX1 or RX2.
-        //   state < 0 (state < RADIOLIB_ERR_NONE): Hardware/Network TX error code.
-        int state = node.sendReceive(payload, sizeof(payload), LORAWAN_FPORT, true, nullptr, &eventDown);
-
-        if (state > 0) {
-            // ACK & Downlink Received Successfully (state = RX Window 1 or 2)!
-            ackCount++;
-            lastAckStatus = true;
-            lastTxErrorCode = 0;
-            lastRssi = (int)eventDown.power; // eventDown.power contains RSSI per DBR §5.2
-            lastSnr = radio.getSNR();       // Read downlink SNR
-
-            Serial.printf("ACK OK! (RX Window %d) | Downlink RSSI: %d dBm | SNR: %.1f dB | Vbat: %.2fV\n",
-                          state, lastRssi, lastSnr, lastVbat);
-        } else {
-            // No ACK or Hardware TX Fault
-            lastAckStatus = false;
-            lastRssi = -999;
-            lastSnr = 0.0f;
-
-            if (state == RADIOLIB_ERR_NONE) {
-                // Uplink sent, but NO ACK/Downlink received in RX1 or RX2 (rxWindow == 0)
-                lastTxErrorCode = 0;
-                Serial.printf("NO ACK Received! (RX Window 0) | Vbat: %.2fV\n", lastVbat);
-            } else {
-                // Hardware / Radio TX Error (state < 0)
-                lastTxErrorCode = state;
-                Serial.printf("TX Error (Code %d) | Vbat: %.2fV\n", state, lastVbat);
-            }
-        }
-
-        // Single unified CSV Log over USB Serial
-        Serial.printf("CSV,%lu,%u,%d,%.1f,%d,%.2f\n",
-                      now, totalSentCount, lastRssi, lastSnr, lastAckStatus ? 1 : 0, lastVbat);
-
-        // Update OLED display with cached metrics
-        updateOledDisplay("", true);
+        sendUplinkPing(now, false);
     }
 }

@@ -29,6 +29,9 @@ static const uint8_t LORAWAN_NWK_KEY[] = {
 // ============================================================================
 #define VEXT_PIN      36   // Vext power control (Active LOW to enable power)
 
+// PRG / User Button Pin (Heltec V3 PRG button, Active LOW with internal pullup)
+#define BUTTON_PIN    0
+
 // SX1262 LoRa Transceiver Pins
 #define RADIO_NSS     8
 #define RADIO_SCK     9
@@ -51,6 +54,7 @@ static const uint8_t LORAWAN_NWK_KEY[] = {
 // DBR PART 5 TIMING & LORAWAN PARAMETERS
 // ============================================================================
 #define UPLINK_INTERVAL_MS  10000   // 10-second confirmed uplink cycle per DBR §5.1
+#define DEBOUNCE_DELAY_MS   200     // 200ms button debounce threshold
 #define LORAWAN_FPORT       1       // FPort for telemetry
 #define TX_POWER_DBM        14      // Transmit power in dBm
 
