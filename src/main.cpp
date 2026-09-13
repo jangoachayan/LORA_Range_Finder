@@ -181,8 +181,8 @@ void sendUplinkPing(unsigned long now, bool isManualTrigger = false) {
         ackCount++;
         lastAckStatus = true;
         lastTxErrorCode = 0;
-        lastRssi = (int)eventDown.power; // eventDown.power contains RSSI per DBR §5.2
-        lastSnr = radio.getSNR();       // Read downlink SNR
+        lastRssi = (int)radio.getRSSI(); // Actual hardware RSSI of received downlink ACK (e.g. -85 dBm)
+        lastSnr = radio.getSNR();        // Actual hardware SNR of received downlink ACK (e.g. 8.5 dB)
 
         Serial.printf("ACK OK! (RX Window %d) | Downlink RSSI: %d dBm | SNR: %.1f dB | Vbat: %.2fV\n",
                       state, lastRssi, lastSnr, lastVbat);
