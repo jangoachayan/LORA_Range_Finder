@@ -293,6 +293,11 @@ void setup() {
         updateOledDisplay("OTAA Config Err: " + String(state), false);
     }
 
+    // Force LoRaWAN node to maximum 22 dBm TX power & disable ADR so network doesn't lower power during range testing
+    node.setTxPower(TX_POWER_DBM);
+    node.setADR(false);
+    Serial.printf("[LoRaWAN] Configured Max TX Power (%d dBm) & ADR Disabled\n", TX_POWER_DBM);
+
     // Attempt Initial Join
     state = node.activateOTAA();
     if (state == RADIOLIB_ERR_NONE || state == RADIOLIB_LORAWAN_NEW_SESSION || state == RADIOLIB_LORAWAN_SESSION_RESTORED) {
