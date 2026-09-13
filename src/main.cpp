@@ -286,8 +286,9 @@ void setup() {
 
     // Attempt Initial Join
     state = node.activateOTAA();
-    if (state == RADIOLIB_ERR_NONE) {
+    if (state == RADIOLIB_ERR_NONE || state == RADIOLIB_LORAWAN_NEW_SESSION || state == RADIOLIB_LORAWAN_SESSION_RESTORED) {
         isJoined = true;
+        lastTxTime = millis();
         Serial.println("[LoRaWAN] OTAA JOIN SUCCESSFUL!");
         updateOledDisplay("Joined Network!", false);
     } else {
@@ -312,8 +313,9 @@ void loop() {
             updateOledDisplay("Retrying OTAA Join...", false);
 
             int state = node.activateOTAA();
-            if (state == RADIOLIB_ERR_NONE) {
+            if (state == RADIOLIB_ERR_NONE || state == RADIOLIB_LORAWAN_NEW_SESSION || state == RADIOLIB_LORAWAN_SESSION_RESTORED) {
                 isJoined = true;
+                lastTxTime = now;
                 Serial.println("[LoRaWAN] OTAA JOIN SUCCESSFUL!");
                 updateOledDisplay("Joined ChirpStack!", false);
             } else {
