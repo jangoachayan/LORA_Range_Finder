@@ -32,6 +32,9 @@ static const uint8_t LORAWAN_NWK_KEY[] = {
 // PRG / User Button Pin (Heltec V3 PRG button, Active LOW with internal pullup)
 #define BUTTON_PIN    0
 
+// Onboard White LED Pin (Heltec V3 White LED, Active HIGH)
+#define LED_PIN       35
+
 // SX1262 LoRa Transceiver Pins
 #define RADIO_NSS     8
 #define RADIO_SCK     9

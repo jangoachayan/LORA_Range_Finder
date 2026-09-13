@@ -26,9 +26,11 @@ int lastRssi = 0;
 float lastSnr = 0.0f;
 float lastVbat = 0.0f;
 bool lastAckStatus = false;
+bool lastTxWasManual = false;
 int lastTxErrorCode = 0; // 0 = No error (or normal NO_RX_WINDOW), non-zero = RadioLib TX fault code
 bool isJoined = false;
 unsigned long lastTxTime = 0;
+unsigned long lastOledRefreshTime = 0;
 
 // Button State
 bool lastButtonState = HIGH;
@@ -81,13 +83,16 @@ void drawSignalBars(int x, int y, int rssi, bool ackReceived) {
     }
 }
 
-void updateOledDisplay(const String &statusLine, bool showMetrics = true) {
+void updateOledDisplay(const String &statusLine, bool showMetrics = true, bool isPinging = false) {
     display.clear();
     display.setTextAlignment(TEXT_ALIGN_LEFT);
 
-    // Header
+    // Header with optional [BTN] tag
     display.setFont(ArialMT_Plain_10);
     display.drawString(0, 0, "LPS8v2 Range Tester");
+    if (lastTxWasManual) {
+        display.drawString(98, 0, "[BTN]");
+    }
     display.drawString(0, 11, "--------------------------------");
 
     if (!showMetrics) {
@@ -95,6 +100,17 @@ void updateOledDisplay(const String &statusLine, bool showMetrics = true) {
         display.setFont(ArialMT_Plain_10);
         display.drawString(0, 26, statusLine);
         display.drawString(0, 42, "Region: IN865 (OTAA)");
+    } else if (isPinging) {
+        // Transmitting / Pinging Banner
+        display.setFont(ArialMT_Plain_16);
+        if (lastTxWasManual) {
+            display.drawString(0, 24, "PINGING... (BTN)");
+        } else {
+            display.drawString(0, 24, "PINGING...");
+        }
+        display.setFont(ArialMT_Plain_10);
+        display.drawString(0, 43, "Sending Confirmed Uplink");
+        display.drawString(0, 54, "Pkt #" + String(totalSentCount + 1));
     } else {
         // Main Walk-Test Display (per DBR §5.4)
         if (lastAckStatus) {
@@ -116,12 +132,13 @@ void updateOledDisplay(const String &statusLine, bool showMetrics = true) {
             drawSignalBars(90, 24, -999, false);
         }
 
-        // Metrics & Reach %
+        // Metrics, Reach %, and Elapsed Seconds Counter ("Count since ping was done")
         display.setFont(ArialMT_Plain_10);
         float reachPct = (totalSentCount > 0) ? ((float)ackCount / (float)totalSentCount) * 100.0f : 0.0f;
-        
-        String metricsLine1 = "SNR: " + String(lastSnr, 1) + " dB | Vbat: " + String(lastVbat, 2) + "V";
-        String metricsLine2 = "Reach: " + String((int)reachPct) + "% (n=" + String(totalSentCount) + ")";
+        unsigned long elapsedSec = (millis() - lastTxTime) / 1000;
+
+        String metricsLine1 = "SNR: " + String(lastSnr, 1) + "dB | Vbat: " + String(lastVbat, 2) + "V";
+        String metricsLine2 = "Reach: " + String((int)reachPct) + "% | " + String(elapsedSec) + "s ago";
 
         display.drawString(0, 43, metricsLine1);
         display.drawString(0, 54, metricsLine2);
@@ -132,7 +149,14 @@ void updateOledDisplay(const String &statusLine, bool showMetrics = true) {
 
 void sendUplinkPing(unsigned long now, bool isManualTrigger = false) {
     lastTxTime = now; // Reset 10-second timer to start fresh from this transmission
+    lastTxWasManual = isManualTrigger;
     totalSentCount++;
+
+    // Turn ON Onboard LED (GPIO 35) for physical feedback during transmission
+    digitalWrite(LED_PIN, HIGH);
+
+    // Show immediate PINGING screen feedback
+    updateOledDisplay("", true, true);
 
     lastVbat = readBatteryVoltage();
 
@@ -150,10 +174,6 @@ void sendUplinkPing(unsigned long now, bool isManualTrigger = false) {
     LoRaWANEvent_t eventDown;
 
     // Perform CONFIRMED send & receive (isConfirmed = true)
-    // RadioLib sendReceive return values:
-    //   state > 0: rxWindow > 0 (1 or 2), DOWNLINK/ACK RECEIVED! eventDown is populated.
-    //   state == 0 (RADIOLIB_ERR_NONE): Uplink sent OK, but NO DOWNLINK/ACK received in RX1 or RX2.
-    //   state < 0 (state < RADIOLIB_ERR_NONE): Hardware/Network TX error code.
     int state = node.sendReceive(payload, sizeof(payload), LORAWAN_FPORT, true, nullptr, &eventDown);
 
     if (state > 0) {
@@ -183,12 +203,15 @@ void sendUplinkPing(unsigned long now, bool isManualTrigger = false) {
         }
     }
 
+    // Turn OFF Onboard LED
+    digitalWrite(LED_PIN, LOW);
+
     // Single unified CSV Log over USB Serial
     Serial.printf("CSV,%lu,%u,%d,%.1f,%d,%.2f\n",
                   now, totalSentCount, lastRssi, lastSnr, lastAckStatus ? 1 : 0, lastVbat);
 
     // Update OLED display with cached metrics
-    updateOledDisplay("", true);
+    updateOledDisplay("", true, false);
 }
 
 // ----------------------------------------------------------------------------
@@ -202,12 +225,14 @@ void setup() {
     Serial.println("DBR-NET-006: 5F Urbanwoods LoRa Range Tester");
     Serial.println("Firmware: LPS8v2 Direct Tester (Part 5)");
     Serial.println("Region: IN865 | LoRaWAN OTAA | Confirmed Uplink");
-    Serial.println("Features: Auto 10s Ping + Manual PRG Button Trigger");
+    Serial.println("Features: Auto 10s Ping + PRG Button Trigger + Live Counter");
     Serial.println("==============================================");
     Serial.println("CSV Header: millis,seq,rssi_dbm,snr_db,ack_received,vbat");
 
-    // 0. Configure Heltec V3 PRG Button (GPIO 0)
+    // 0. Configure Heltec V3 PRG Button (GPIO 0) & Onboard White LED (GPIO 35)
     pinMode(BUTTON_PIN, INPUT_PULLUP);
+    pinMode(LED_PIN, OUTPUT);
+    digitalWrite(LED_PIN, LOW);
 
     // 1. Turn ON Vext Power (GPIO 36 LOW powers OLED & SX1262)
     pinMode(VEXT_PIN, OUTPUT);
@@ -299,7 +324,13 @@ void loop() {
         return;
     }
 
-    // 2. Manual PRG Button Press Trigger (GPIO 0)
+    // 2. Refresh OLED Elapsed Counter Every 1 Second
+    if (now - lastOledRefreshTime >= 1000) {
+        lastOledRefreshTime = now;
+        updateOledDisplay("", true, false);
+    }
+
+    // 3. Manual PRG Button Press Trigger (GPIO 0)
     bool currentButtonState = digitalRead(BUTTON_PIN);
     if (currentButtonState == LOW && lastButtonState == HIGH && (now - lastDebounceTime >= DEBOUNCE_DELAY_MS)) {
         lastDebounceTime = now;
@@ -308,7 +339,7 @@ void loop() {
     }
     lastButtonState = currentButtonState;
 
-    // 3. Periodic Confirmed Uplink Loop (Every 10 seconds per DBR §5.1)
+    // 4. Periodic Confirmed Uplink Loop (Every 10 seconds per DBR §5.1)
     if (now - lastTxTime >= UPLINK_INTERVAL_MS) {
         sendUplinkPing(now, false);
     }
