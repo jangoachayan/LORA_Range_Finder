@@ -59,6 +59,6 @@ static const uint8_t LORAWAN_NWK_KEY[] = {
 #define UPLINK_INTERVAL_MS  10000   // 10-second confirmed uplink cycle per DBR §5.1
 #define DEBOUNCE_DELAY_MS   200     // 200ms button debounce threshold
 #define LORAWAN_FPORT       1       // FPort for telemetry
-#define TX_POWER_DBM        14      // Transmit power in dBm
+#define TX_POWER_DBM        22      // Transmit power in dBm (22 dBm max hardware capacity for Heltec V3 SX1262)
 
 #endif // CONFIG_H

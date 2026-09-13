@@ -274,6 +274,15 @@ void setup() {
         Serial.printf("FAILED, code %d\n", state);
     }
 
+    // Set Max Tx Output Power (22 dBm for SX1262 max reach & fast join)
+    Serial.printf("[RadioLib] Setting Output Power to %d dBm... ", TX_POWER_DBM);
+    state = radio.setOutputPower(TX_POWER_DBM);
+    if (state == RADIOLIB_ERR_NONE) {
+        Serial.println("SUCCESS!");
+    } else {
+        Serial.printf("FAILED, code %d\n", state);
+    }
+
     // 7. LoRaWAN OTAA Setup (IN865 Region)
     Serial.println("[LoRaWAN] Configuring OTAA Keys for IN865...");
     updateOledDisplay("Joining ChirpStack...", false);
